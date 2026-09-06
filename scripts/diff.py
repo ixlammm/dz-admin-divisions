@@ -247,6 +247,52 @@ def compute_changelog(
     return "\n".join(lines).rstrip() + "\n"
 
 
+# GitHub release bodies are capped at 125,000 characters, so the (potentially huge)
+# full changelog is shipped as an asset while the release body carries a short summary.
+def compute_summary(
+    old: dict[str, Any] | None, new: dict[str, Any], show_geometry: bool = False
+) -> str:
+    """A compact release-body summary (counts + a small preview of changes)."""
+    version = new.get("version", "?")
+    lines: list[str] = [f"# Algeria Administrative Divisions — {version}", ""]
+    if old:
+        lines.append(f"Comparing against previous release `{(old or {}).get('version')}`.")
+    else:
+        lines.append("This is the **initial release**.")
+    lines.append("")
+
+    for kind, label in (("provinces", "Provinces"), ("communes", "Communes")):
+        old_items = (old or {}).get(kind, []) if old else []
+        new_items = new.get(kind, [])
+
+        if not old_items:
+            lines.append(f"**{len(new_items)}** {label.lower()}.")
+            lines.append(f"see `{kind}-{version}.json` for the full list — the full "
+                         "changelog is attached.")
+            lines.append("")
+            continue
+
+        added, removed, modified, geometry_only = _match_entities(old_items, new_items)
+        lines.append(f"## {label} ({len(new_items)})")
+        lines.append(
+            f"+{len(added)} new · -{len(removed)} removed · {len(modified)} modified · "
+            f"{len(geometry_only)} geometry-only"
+        )
+        if added:
+            lines.append("\n### New")
+            lines.append(_fmt_list([_item_label(r) for r in added[:8]]))
+            if len(added) > 8:
+                lines.append(f"- … and {len(added) - 8} more")
+        if removed:
+            lines.append("\n### Removed")
+            lines.append(_fmt_list([_item_label(r) for r in removed[:8]]))
+            if len(removed) > 8:
+                lines.append(f"- … and {len(removed) - 8} more")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def load_json(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)

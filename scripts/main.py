@@ -28,7 +28,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from extract import extract_pbf, write_json  # noqa: E402
-from diff import compute_changelog, load_json  # noqa: E402
+from diff import compute_changelog, compute_summary, load_json  # noqa: E402
 
 BASE = "https://download.geofabrik.de/africa"
 INDEX_URL = f"{BASE}/algeria.html"
@@ -342,13 +342,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  [dry-run] skipping release for {tag}")
         else:
             title = f"Algeria Admin Divisions {human_date(version)}"
+            # GitHub release bodies are limited to 125k chars; ship the full changelog
+            # as an asset and only inline it if it is small enough.
+            body_path = cl_path if len(changelog) <= 125000 else workdir / f"release-summary-{version}.md"
+            if body_path != cl_path:
+                body_path.write_text(compute_summary(prev, doc, show_geometry=args.show_geometry),
+                                     encoding="utf-8")
             files = [
                 str(artifacts["combined"]),
                 str(artifacts["provinces"]),
                 str(artifacts["communes"]),
                 str(cl_path),
             ]
-            cmd = ["release", "create", tag, "--title", title, "--notes-file", str(cl_path)]
+            cmd = ["release", "create", tag, "--title", title,
+                   "--notes-file", str(body_path)]
             cmd += files
             print(f"  creating release: gh release create {tag} ({len(files)} assets)")
             gh(repo, *cmd)
