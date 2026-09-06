@@ -1,0 +1,59 @@
+name: Update Algeria Admin Divisions
+
+concurrency:
+  group: update-divisions
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "Only process snapshots from this YYMMDD date (e.g. 260801). Leave empty to process all new ones."
+        required: false
+        default: ""
+      limit:
+        description: "Maximum number of snapshots to process (0 = all new)."
+        required: false
+        default: "0"
+      dry_run:
+        description: "Extract and diff without publishing releases."
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Detect and process new snapshots
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS="run"
+          if [ -n "${{ github.event.inputs.from_date }}" ]; then
+            ARGS="$ARGS --from-date ${{ github.event.inputs.from_date }}"
+          fi
+          if [ -n "${{ github.event.inputs.limit }}" ] && [ "${{ github.event.inputs.limit }}" != "0" ]; then
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python scripts/main.py $ARGS

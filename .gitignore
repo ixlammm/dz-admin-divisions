@@ -1,0 +1,6 @@
+test/
+out/
+.work/
+__pycache__/
+*.pyc
+algeria-*.osm.pbf
