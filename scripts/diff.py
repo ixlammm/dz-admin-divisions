@@ -129,12 +129,28 @@ def _match_entities(
     return added, removed, modified, geometry_only
 
 
+def _item_label(rec: dict[str, Any]) -> str:
+    """Compact, human-readable label for an entity in the changelog.
+
+    Prefers the clean Latin/French name over the (sometimes multi-script) `name` tag.
+    """
+    name = (
+        rec.get("name_fr")
+        or rec.get("name_en")
+        or rec.get("name_latin")
+        or rec.get("name")
+        or rec.get("name_ar")
+    )
+    code = rec.get("code")
+    if name and code:
+        return f"{name} ({code})"
+    return name or code or str(rec.get("osm_id"))
+
+
 def _fmt_list(names: list[str]) -> str:
     if not names:
         return ""
-    if len(names) <= 10:
-        return "- " + "\n- ".join(names)
-    return "- " + "\n- ".join(names[:10]) + f"\n- … and {len(names) - 10} more"
+    return "- " + "\n- ".join(names)
 
 
 def _field_label(field: str) -> str:
@@ -157,7 +173,7 @@ def _render_modified(entries: list[dict[str, Any]], kind: str) -> list[str]:
     lines: list[str] = []
     for entry in entries:
         old, new = entry["old"], entry["new"]
-        label = new.get("name") or new.get("code") or str(new.get("osm_id"))
+        label = _item_label(new)
         lines.append(f"**{label}**")
         for field in entry["changed"]:
             old_val = _norm(old.get(field))
@@ -190,11 +206,13 @@ def compute_changelog(
         new_items = new.get(kind, [])
 
         if not old_items:
-            # Initial release: list everything.
+            # Initial release: list everything (it is all "new").
             out.append(f"\n## {label} ({len(new_items)})")
             out.append(
                 f"Initial release — **{len(new_items)}** {label.lower()} recorded."
             )
+            out.append(f"\n### All {label.lower()}")
+            out.append(_fmt_list([_item_label(r) for r in new_items]))
             continue
 
         added, removed, modified, geometry_only = _match_entities(
@@ -208,26 +226,17 @@ def compute_changelog(
 
         if added:
             out.append("\n### Added")
-            out.append(_fmt_list([r.get("name") or r.get("code") or str(r.get("osm_id")) for r in added]))
+            out.append(_fmt_list([_item_label(r) for r in added]))
         if removed:
             out.append("\n### Removed")
-            out.append(_fmt_list([r.get("name") or r.get("code") or str(r.get("osm_id")) for r in removed]))
+            out.append(_fmt_list([_item_label(r) for r in removed]))
         if modified:
             out.append("\n### Modified")
             out.extend(_render_modified(modified, kind))
         if geometry_only:
             out.append("\n### Geometry-only changes (count)")
             if show_geometry:
-                out.append(
-                    _fmt_list(
-                        [
-                            r["new"].get("name")
-                            or r["new"].get("code")
-                            or str(r["new"].get("osm_id"))
-                            for r in geometry_only
-                        ]
-                    )
-                )
+                out.append(_fmt_list([_item_label(r["new"]) for r in geometry_only]))
             else:
                 out.append(
                     f"{len(geometry_only)} {label.lower()} had boundary updates "
