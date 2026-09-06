@@ -1,15 +1,16 @@
 """Compare two normalized administrative-divisions JSON documents and produce a changelog.
 
-Entities are matched across releases with a two-tier strategy (so a redrawn relation —
-a new OSM id or a changed/missing national code — is reported as *modified*-like rather
-than removed+added):
-  1. by `code` (ISO3166-2 for provinces / ONS `ref:ons` for communes) when present,
-  2. otherwise by the normalized place name (unique match).
+Entities are matched across releases with a priority chain (so a commune that merely
+gained a national code or a spelling/transliteration tweak is NOT reported as
+removed+added):
+  1. by OSM relation id (``osm_id``) — the same relation is always the same place,
+  2. by ``code`` (ISO3166-2 for provinces / ONS ``ref:ons`` for communes) when present,
+  3. by the normalized place name (diacritics stripped; unique match only).
 
 Classification per entity:
   * added          - present in new but matched by no old entity
   * removed        - present in old but matched by no new entity
-  * modified       - matched, but a "user-facing" attribute changed (name, wikidata, ...)
+  * modified       - matched, but the French/Latin `name_fr` changed (a real rename)
   * geometry_only  - matched, attributes identical, but geometry_hash changed (count only)
 
 The `--show-geometry` option lists geometry-only changes by name; otherwise it records
@@ -18,21 +19,15 @@ a count only (boundaries are refined daily in OSM, so geometry diffs are noisy).
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
-# Fields that count as a user-facing attribute change (a re-tagging of the code/ref
-# metadata or a boundary redraw is handled separately: geometry -> geometry-only count).
+# "Modified" means a genuine rename of the French/Latin administrative name (name_fr).
+# Enrichment (Arabic/Berber/English names, wikidata, population) and boundary redraws
+# are not treated as modifications — those are reportable via the JSON/geometry-only.
 ATTR_FIELDS = [
-    "name",
-    "name_ar",
     "name_fr",
-    "name_ber",
-    "name_latin",
-    "name_en",
-    "wikidata",
-    "wikipedia",
-    "population",
 ]
 
 
@@ -43,12 +38,26 @@ def _norm(value: Any) -> Any:
     return value
 
 
+def _norm_text(value: Any) -> str | None:
+    """Normalize a value for comparison: lowercase, strip diacritics, collapse spaces.
+
+    Used so that transliteration differences (e.g. ``Souamaa`` vs ``Souamaâ``) do not
+    produce spurious adds/removes or "modifications".
+    """
+    if value is None:
+        return None
+    s = unicodedata.normalize("NFKD", str(value))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower().strip()
+    return " ".join(s.split()) or None
+
+
 def _pure_name(rec: dict[str, Any]) -> str:
     """A normalized place-name key used to match entities when code/id differ."""
     for k in ("name_fr", "name_en", "name_latin", "name_ber", "name", "name_ar"):
-        v = rec.get(k)
+        v = _norm_text(rec.get(k))
         if v:
-            return v.strip().lower()
+            return v
     return ""
 
 
@@ -58,7 +67,7 @@ def _classify_pair(
     modified: list[dict[str, Any]],
     geometry_only: list[dict[str, Any]],
 ) -> None:
-    changed = [f for f in ATTR_FIELDS if _norm(old_rec.get(f)) != _norm(new_rec.get(f))]
+    changed = [f for f in ATTR_FIELDS if _norm_text(old_rec.get(f)) != _norm_text(new_rec.get(f))]
     if changed:
         modified.append({"old": old_rec, "new": new_rec, "changed": changed})
     elif old_rec.get("geometry_hash") != new_rec.get("geometry_hash"):
@@ -70,57 +79,61 @@ def _match_entities(
 ) -> tuple[list, list, list, list]:
     """Return (added, removed, modified, geometry_only) lists of dicts.
 
-    Two-tier matching so that redrawn entities (a new relation id or a changed/missing
-    code, but the same place name) are reported as *modified* rather than removed+added:
-      1. match by national code (ISO3166-2 / ONS ``ref:ons``) when present,
-      2. match the remainder by normalized place name (unique match only).
+    Matching priority per new entity:
+      1. of OSM relation id (``osm_id``) — same relation in OSM is the same place, so this
+         is always correct (a commune that merely gained a code/name stays matched),
+      2. national code (ISO3166-2 / ONS ``ref:ons``) — handles redraws that produced a
+         new relation id but kept the same code,
+      3. normalized place name (unique match) — handles re-coding/renames.
+
+    This avoids reporting an unchanged commune as "removed + added" when it gained a
+    code or a spelling/transliteration change between snapshots.
     """
     added: list[dict[str, Any]] = []
     removed: list[dict[str, Any]] = []
     modified: list[dict[str, Any]] = []
     geometry_only: list[dict[str, Any]] = []
 
+    old_by_id: dict[int, dict[str, Any]] = {}
     old_by_code: dict[str, dict[str, Any]] = {}
     old_by_name: dict[str, list[dict[str, Any]]] = {}
     for o in old:
-        code = _norm(o.get("code"))
+        oid = o.get("osm_id")
+        if oid is not None:
+            old_by_id[oid] = o
+        code = _norm_text(o.get("code"))
         if code:
-            old_by_code[str(code).lower()] = o
+            old_by_code[code] = o
         nm = _pure_name(o)
         if nm:
             old_by_name.setdefault(nm, []).append(o)
 
-    new_by_code: dict[str, dict[str, Any]] = {}
-    for n in new:
-        code = _norm(n.get("code"))
-        if code:
-            new_by_code[str(code).lower()] = n
-
     used_old: set[int] = set()
     used_new: set[int] = set()
 
-    # Pass 1: match by the national code (most stable identifier).
-    for code, nrec in new_by_code.items():
-        orec = old_by_code.get(code)
+    def find_old(nrec: dict[str, Any]) -> dict[str, Any] | None:
+        nid = nrec.get("osm_id")
+        if nid is not None and nid in old_by_id and id(old_by_id[nid]) not in used_old:
+            return old_by_id[nid]
+        code = _norm_text(nrec.get("code"))
+        if code and code in old_by_code and id(old_by_code[code]) not in used_old:
+            return old_by_code[code]
+        nm = _pure_name(nrec)
+        if nm:
+            candidates = [o for o in old_by_name.get(nm, []) if id(o) not in used_old]
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
+
+    for nrec in new:
+        orec = find_old(nrec)
         if orec is not None:
             _classify_pair(orec, nrec, modified, geometry_only)
             used_old.add(id(orec))
             used_new.add(id(nrec))
+        else:
+            added.append(nrec)
 
-    # Pass 2: match the remainder by place name (only a unique old candidate).
-    for nrec in new:
-        if id(nrec) in used_new:
-            continue
-        nm = _pure_name(nrec)
-        if not nm:
-            continue
-        candidates = [o for o in old_by_name.get(nm, []) if id(o) not in used_old]
-        if len(candidates) == 1:
-            _classify_pair(candidates[0], nrec, modified, geometry_only)
-            used_old.add(id(candidates[0]))
-            used_new.add(id(nrec))
-
-    added = [n for n in new if id(n) not in used_new]
     removed = [o for o in old if id(o) not in used_old]
     return added, removed, modified, geometry_only
 
