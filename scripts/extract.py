@@ -218,30 +218,25 @@ def _point_in_rings(pt: tuple[float, float], rings: list[list[tuple[float, float
 
 # --- record shaping ---
 
-def _wilaya_identity(tags: dict[str, str]) -> str | None:
-    """The code used to decide whether a level-4 relation is an Algerian wilaya.
+def _is_wilaya(tags: dict[str, str], inside_algeria: bool) -> bool:
+    """Decide whether a level-4 relation is a genuine Algerian wilaya.
 
-    Prefers the ISO 3166-2 code; falls back to a plain numeric wilaya number
-    (e.g. DZ-63 El Aricha is tagged with a numeric ref rather than an ISO code).
+    * A proper ISO 3166-2 code (``DZ-xx``) is authoritative.
+    * A *numeric* ref is only trusted for the recently-created wilayas (>= 49) that OSM
+      sometimes tags without an ISO code yet (e.g. DZ-63 El Aricha). Small numbers are
+      not wilaya numbers — they come from foreign/ambiguous regions (e.g. Morocco's
+      Souss-Massa carries ``ref=9``), which we must exclude.
     """
     iso = tags.get("ISO3166-2")
-    if iso:
-        return iso
+    if iso and iso.startswith("DZ-"):
+        return True
     ref = tags.get("ref")
-    if ref and str(ref).isdigit():
-        return str(ref)
-    return None
-
-
-def _is_wilaya(tags: dict[str, str], inside_algeria: bool) -> bool:
-    code = _wilaya_identity(tags)
-    if code is None:
-        return False
-    s = str(code)
-    if s.startswith("DZ-"):
-        return True
-    if s.isdigit() and 1 <= int(s) <= 99 and inside_algeria:
-        return True
+    if ref and inside_algeria:
+        s = str(ref).strip()
+        if s.isdigit():
+            n = int(s)
+            if 49 <= n <= 99:
+                return True
     return False
 
 
